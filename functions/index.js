@@ -1,0 +1,367 @@
+const functions = require("firebase-functions");
+const admin = require("firebase-admin");
+
+admin.initializeApp({
+    credential: admin.credential.applicationDefault(), 
+});
+
+const express = require("express");
+const cors = require("cors");
+
+// Main App
+const app = express();
+app.use(cors({ origin: true }));
+const db = admin.firestore();
+
+
+
+// token untuk firebase Auth
+const authenticate = async (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).send("Unauthorized: No token provided");
+    }
+
+    const idToken = authHeader.split("Bearer ")[1];
+
+    try {
+        const decodedToken = await admin.auth().verifyIdToken(idToken);
+        req.user = decodedToken; 
+        next();
+    } catch (error) {
+        return res.status(401).send("Unauthorized: Invalid token");
+    }
+};
+
+// Add Transaction
+app.post("/transaction", authenticate, async (req, res) => {
+    const { type, category, amount } = req.body;
+
+    if (!type || !category || !amount ) {
+        return res.status(400).send("Bad Request: Missing required fields");
+    }
+
+    try {
+        const categoryRef = db.collection("categories").doc(category);
+        const categoryDoc = await categoryRef.get();
+
+        if (!categoryDoc.exists) {
+            return res.status(400).send("Bad Request: Invalid category");
+        }
+
+        const userRef = db.collection("users").doc(req.user.uid);
+        const userDoc = await userRef.get();
+
+        if (!userDoc.exists) {
+            return res.status(404).send("User not found");
+        }
+
+        // Hitung saldo baru
+        const currentSaldo = userDoc.data().saldo || 0;
+        const updatedSaldo = type === "income"
+            ? currentSaldo + parseFloat(amount)
+            : currentSaldo - parseFloat(amount);
+
+        // Update saldo user
+        await userRef.update({ saldo: updatedSaldo });
+
+        // Tambahkan transaksi ke Firestore
+        const newTransactionRef = db.collection("transactions").doc();
+        const newTransactionId = newTransactionRef.id;
+
+        const newTransaction = {
+            id: newTransactionId, // Simpan ID transaksi ke dokumen
+            user_id: req.user.uid,
+            type,
+            category,
+            amount: parseFloat(amount),
+            date: new Date(),
+        };
+
+        await newTransactionRef.set(newTransaction);
+
+        return res.status(201).send({
+            message: "Transaction added successfully",
+            newTransaction,
+        });
+    } catch (error) {
+        console.error("Error adding transaction:", error);
+        return res.status(500).send("Error adding transaction: " + error.message);
+    }
+});
+
+
+// Kurangi atau Tambahkan Saldo Saat Transaksi Dihapus
+app.delete("/transaction/:transactionId", authenticate, async (req, res) => {
+    const { transactionId } = req.params;
+
+    try {
+        const transactionRef = db.collection("transactions").doc(transactionId);
+        const transactionDoc = await transactionRef.get();
+
+        if (!transactionDoc.exists) {
+            return res.status(404).send("Transaction not found");
+        }
+
+        const transactionData = transactionDoc.data();
+
+        if (transactionData.user_id !== req.user.uid) {
+            return res.status(403).send("Forbidden: You are not authorized to delete this transaction");
+        }
+
+        const userRef = db.collection("users").doc(req.user.uid);
+        const userDoc = await userRef.get();
+
+        if (!userDoc.exists) {
+            return res.status(404).send("User not found");
+        }
+
+        // Update saldo berdasarkan tipe transaksi
+        const currentSaldo = userDoc.data().saldo || 0;
+        const updatedSaldo = transactionData.type === "income"
+            ? currentSaldo - parseFloat(transactionData.amount)
+            : currentSaldo + parseFloat(transactionData.amount);
+
+        await userRef.update({ saldo: updatedSaldo });
+
+        await transactionRef.delete();
+        return res.status(200).send({ message: "Transaction deleted successfully" });
+    } catch (error) {
+        console.error("Error deleting transaction:", error);
+        return res.status(500).send("Error deleting transaction: " + error.message);
+    }
+});
+
+
+// edit user
+app.patch("/edit-user", authenticate, async (req, res) => {
+    const { username, phone } = req.body;
+
+    if (!username && !phone) {
+        return res.status(400).send({
+            error: "Bad Request",
+            message: "At least one of username or phone must be provided."
+        });
+    }
+
+    try {
+        const userId = req.user.uid; 
+        const userRef = db.collection("users").doc(userId);
+
+        const updateData = {};
+        if (username) updateData.username = username;
+        if (phone) updateData.phone = phone;
+
+        await userRef.update(updateData);
+
+        return res.status(200).send({
+            message: "User updated successfully",
+            updatedFields: updateData,
+        });
+    } catch (error) {
+        console.error("Error updating user:", error);
+        return res.status(500).send({
+            error: "Internal Server Error",
+            message: error.message,
+        });
+    }
+});
+
+// riwayat per bulan
+app.get("/transactions/monthly", authenticate, async (req, res) => {
+    const { type, month, year } = req.query;
+
+    if (!type || !month || !year) {
+        return res.status(400).send("Bad Request: Missing required fields (type, month, year).");
+    }
+
+    try {
+        const startDate = new Date(year, month - 1, 1);  
+        const endDate = new Date(year, month, 0);        
+
+        const transactionsQuery = db.collection("transactions")
+            .where("user_id", "==", req.user.uid)  
+            .where("type", "==", type)              
+            .where("date", ">=", startDate)        
+            .where("date", "<=", endDate);         
+
+        const snapshot = await transactionsQuery.get();
+
+        if (snapshot.empty) {
+            return res.status(404).send({ message: `No ${type} transactions found for ${month}-${year}.` });
+        }
+
+        const transactions = snapshot.docs.map(doc => doc.data());
+
+        return res.status(200).send({ message: `${type} transactions for ${month}-${year}`, transactions });
+    } catch (error) {
+        console.error("Error fetching transactions:", error);
+        return res.status(500).send({ error: "Internal Server Error", message: error.message });
+    }
+});
+
+// Add a new category
+app.post("/category", async (req, res) => {
+    const { name, defaultCategory } = req.body;
+
+    if (!name) {
+        return res.status(400).send("Bad Request: Missing required fields");
+    }
+
+    try {
+        const newCategory = {
+            name,
+            default: defaultCategory || false, 
+        };
+
+        await db.collection("categories").doc(name).set(newCategory);
+        return res.status(201).send({ message: "Category added successfully", newCategory });
+    } catch (error) {
+        return res.status(500).send("Error adding category: " + error.message);
+    }
+});
+
+// Register User - Tambahkan Saldo Awal
+app.post("/register", async (req, res) => {
+    const { email, password, username } = req.body;
+
+    if (!email || !password || !username ) {
+        return res.status(400).send("All fields are required");
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        return res.status(400).send("Gunakan valid email");
+    }
+
+    try {
+        const userRecord = await admin.auth().createUser({
+            email,
+            password,
+            displayName: username,
+        });
+
+        await db.collection("users").doc(userRecord.uid).set({
+            username,
+            email,
+            saldo: 0, // Set saldo awal menjadi 0
+        });
+
+        res.status(201).send("User registered successfully");
+    } catch (error) {
+        console.error("Error registering user:", error);
+        res.status(500).send("Error registering user");
+    }
+});
+
+
+app.post("/register-google", async (req, res) => {
+    const { email } = req.body;
+
+    if (!email) {
+        return res.status(400).send({
+            success: false,
+            message: "Email is required",
+        });
+    }
+
+    // Validasi format email
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+        return res.status(400).send({
+            success: false,
+            message: "Gunakan valid email",
+        });
+    }
+
+    try {
+        // Periksa apakah pengguna sudah ada
+        const existingUser = await admin.auth().getUserByEmail(email);
+
+        return res.status(200).send({
+            success: true,
+            message: "User already exists. Proceed to login.",
+            user: {
+                uid: existingUser.uid,
+                email: existingUser.email,
+            },
+        });
+    } catch (error) {
+        if (error.code === "auth/user-not-found") {
+            try {
+                // Buat pengguna baru jika tidak ditemukan
+                const newUser = await admin.auth().createUser({
+                    email: email,
+                });
+
+                // Tambahkan data pengguna ke Firestore
+                await db.collection("users").doc(newUser.uid).set({
+                    email: newUser.email,
+                    username: "", // Kosongkan username
+                    saldo: 0,   // Kosongkan phone
+                });
+
+                return res.status(201).send({
+                    success: true,
+                    message: "User registered successfully",
+                    user: {
+                        uid: newUser.uid,
+                        email: newUser.email,
+                    },
+                });
+            } catch (createError) {
+                console.error("Error creating new user:", createError.message);
+                return res.status(500).send({
+                    success: false,
+                    message: "Gunakan valid email",
+                });
+            }
+        }
+
+        console.error("Error registering user with Google:", error.message);
+        return res.status(500).send({
+            success: false,
+            message: "Gunakan valid email",
+        });
+    }
+});
+
+app.get("/saldo", authenticate, async (req, res) => {
+    try {
+        // Referensi ke dokumen user berdasarkan UID
+        const userRef = db.collection("users").doc(req.user.uid);
+        const userDoc = await userRef.get();
+
+        // Periksa apakah user ditemukan
+        if (!userDoc.exists) {
+            return res.status(404).send("User not found");
+        }
+
+        // Ambil saldo dari dokumen user
+        const saldo = userDoc.data().saldo || 0;
+
+        return res.status(200).send({
+            message: "Saldo retrieved successfully",
+            saldo,
+        });
+    } catch (error) {
+        console.error("Error retrieving saldo:", error);
+        return res.status(500).send("Error retrieving saldo: " + error.message);
+    }
+});
+
+
+// Endpoint untuk mendapatkan data pengguna setelah login
+app.get("/user", authenticate, async (req, res) => {
+    try {
+        const userRecord = await admin.auth().getUser(req.user.uid);
+        res.status(200).send(userRecord);
+    } catch (error) {
+        console.error("Error fetching user data:", error.message);
+        res.status(500).send("Error fetching user data");
+    }
+});
+
+
+// Export the app
+exports.app = functions.https.onRequest(app);
