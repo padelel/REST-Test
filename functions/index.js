@@ -2,7 +2,7 @@ const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 
 admin.initializeApp({
-    credential: admin.credential.applicationDefault(), 
+    credential: admin.credential.applicationDefault(),
 });
 
 const express = require("express");
@@ -26,7 +26,7 @@ const authenticate = async (req, res, next) => {
 
     try {
         const decodedToken = await admin.auth().verifyIdToken(idToken);
-        req.user = decodedToken; 
+        req.user = decodedToken;
         next();
     } catch (error) {
         return res.status(401).send("Unauthorized: Invalid token");
@@ -37,7 +37,8 @@ const authenticate = async (req, res, next) => {
 app.post("/transaction", authenticate, async (req, res) => {
     const { type, category, amount } = req.body;
 
-    if (!type || !category || !amount ) {
+
+    if (!type || !category || !amount) {
         return res.status(400).send("Bad Request: Missing required fields");
     }
 
@@ -58,7 +59,7 @@ app.post("/transaction", authenticate, async (req, res) => {
 
         // Hitung saldo baru
         const currentSaldo = userDoc.data().saldo || 0;
-        const updatedSaldo = type === "income"
+        const updatedSaldo = type === "Income"
             ? currentSaldo + parseFloat(amount)
             : currentSaldo - parseFloat(amount);
 
@@ -118,7 +119,7 @@ app.delete("/transaction/:transactionId", authenticate, async (req, res) => {
 
         // Update saldo berdasarkan tipe transaksi
         const currentSaldo = userDoc.data().saldo || 0;
-        const updatedSaldo = transactionData.type === "income"
+        const updatedSaldo = transactionData.type === "Income"
             ? currentSaldo - parseFloat(transactionData.amount)
             : currentSaldo + parseFloat(transactionData.amount);
 
@@ -135,9 +136,9 @@ app.delete("/transaction/:transactionId", authenticate, async (req, res) => {
 
 // edit user
 app.patch("/edit-user", authenticate, async (req, res) => {
-    const { username, phone } = req.body;
+    const { username} = req.body;
 
-    if (!username && !phone) {
+    if (!username) {
         return res.status(400).send({
             error: "Bad Request",
             message: "At least one of username or phone must be provided."
@@ -145,12 +146,11 @@ app.patch("/edit-user", authenticate, async (req, res) => {
     }
 
     try {
-        const userId = req.user.uid; 
+        const userId = req.user.uid;
         const userRef = db.collection("users").doc(userId);
 
         const updateData = {};
         if (username) updateData.username = username;
-        if (phone) updateData.phone = phone;
 
         await userRef.update(updateData);
 
@@ -176,29 +176,109 @@ app.get("/transactions/monthly", authenticate, async (req, res) => {
     }
 
     try {
-        const startDate = new Date(year, month - 1, 1);  
-        const endDate = new Date(year, month, 0);        
+        const startDate = new Date(year, month - 1, 1);
+        const endDate = new Date(year, month, 0);
 
-        const transactionsQuery = db.collection("transactions")
-            .where("user_id", "==", req.user.uid)  
-            .where("type", "==", type)              
-            .where("date", ">=", startDate)        
-            .where("date", "<=", endDate);         
+        if (type === "All") {
+            // Query 'Income' transactions
+            const incomeQuery = db.collection("transactions")
+                .where("user_id", "==", req.user.uid)
+                .where("type", "==", "Income")
+                .where("date", ">=", startDate)
+                .where("date", "<=", endDate);
+            const incomeSnapshot = await incomeQuery.get();
 
-        const snapshot = await transactionsQuery.get();
+            // Query 'Outcome' transactions
+            const outcomeQuery = db.collection("transactions")
+                .where("user_id", "==", req.user.uid)
+                .where("type", "==", "Outcome")
+                .where("date", ">=", startDate)
+                .where("date", "<=", endDate);
+            const outcomeSnapshot = await outcomeQuery.get();
 
-        if (snapshot.empty) {
-            return res.status(404).send({ message: `No ${type} transactions found for ${month}-${year}.` });
+            // Combine results
+            const incomeTransactions = incomeSnapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data(),
+                date: doc.data().date.toDate().toISOString(), // Convert date to ISO string
+            }));
+
+            const outcomeTransactions = outcomeSnapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data(),
+                date: doc.data().date.toDate().toISOString(),
+            }));
+
+            const allTransactions = [...incomeTransactions, ...outcomeTransactions];
+
+            if (allTransactions.length === 0) {
+                return res.status(404).send({ message: `No transactions found for ${month}-${year}.` });
+            }
+
+            return res.status(200).send({
+                message: `All transactions (Income and Outcome) for ${month}-${year}`,
+                transactions: allTransactions,
+            });
+        } else {
+            // Query specific type (Income or Outcome)
+            const transactionsQuery = db.collection("transactions")
+                .where("user_id", "==", req.user.uid)
+                .where("type", "==", type)
+                .where("date", ">=", startDate)
+                .where("date", "<=", endDate);
+            const snapshot = await transactionsQuery.get();
+
+            if (snapshot.empty) {
+                return res.status(404).send({ message: `No ${type} transactions found for ${month}-${year}.` });
+            }
+
+            const transactions = snapshot.docs.map(doc => ({
+                id: doc.id,
+                ...doc.data(),
+                date: doc.data().date.toDate().toISOString(),
+            }));
+
+            return res.status(200).send({
+                message: `${type} transactions for ${month}-${year}`,
+                transactions,
+            });
         }
-
-        const transactions = snapshot.docs.map(doc => doc.data());
-
-        return res.status(200).send({ message: `${type} transactions for ${month}-${year}`, transactions });
     } catch (error) {
         console.error("Error fetching transactions:", error);
         return res.status(500).send({ error: "Internal Server Error", message: error.message });
     }
 });
+
+// Endpoint: Get latest 5 transactions
+app.get("/transactions/latest", authenticate, async (req, res) => {
+    try {
+        const transactionsQuery = db.collection("transactions")
+            .where("user_id", "==", req.user.uid)
+            .orderBy("date", "desc")
+            .limit(5);
+
+        const snapshot = await transactionsQuery.get();
+
+        if (snapshot.empty) {
+            return res.status(404).send({ message: "No transactions found" });
+        }
+
+        const transactions = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data(),
+            date: doc.data().date.toDate().toISOString(), // Convert date to ISO string
+        }));
+
+        return res.status(200).send({
+            message: "Latest 5 transactions retrieved successfully",
+            transactions,
+        });
+    } catch (error) {
+        console.error("Error fetching latest transactions:", error);
+        return res.status(500).send({ error: "Internal Server Error", message: error.message });
+    }
+});
+
 
 // Add a new category
 app.post("/category", async (req, res) => {
@@ -211,7 +291,7 @@ app.post("/category", async (req, res) => {
     try {
         const newCategory = {
             name,
-            default: defaultCategory || false, 
+            default: defaultCategory || false,
         };
 
         await db.collection("categories").doc(name).set(newCategory);
@@ -225,7 +305,7 @@ app.post("/category", async (req, res) => {
 app.post("/register", async (req, res) => {
     const { email, password, username } = req.body;
 
-    if (!email || !password || !username ) {
+    if (!email || !password || !username) {
         return res.status(400).send("All fields are required");
     }
 
