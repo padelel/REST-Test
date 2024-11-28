@@ -6,6 +6,7 @@
   "functions": [
     {
       "source": "functions",
+      "region": "asia-southeast2",
       "codebase": "default",
       "ignore": [
         "node_modules",

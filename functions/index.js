@@ -136,12 +136,12 @@ app.delete("/transaction/:transactionId", authenticate, async (req, res) => {
 
 // edit user
 app.patch("/edit-user", authenticate, async (req, res) => {
-    const { username} = req.body;
+    const { username, photo } = req.body;
 
-    if (!username) {
+    if (!username && !photo) {
         return res.status(400).send({
             error: "Bad Request",
-            message: "At least one of username or phone must be provided."
+            message: "At least one of username or photo must be provided.",
         });
     }
 
@@ -151,6 +151,7 @@ app.patch("/edit-user", authenticate, async (req, res) => {
 
         const updateData = {};
         if (username) updateData.username = username;
+        if (photo) updateData.photo = photo; // Perbarui photo jika ada
 
         await userRef.update(updateData);
 
@@ -166,6 +167,7 @@ app.patch("/edit-user", authenticate, async (req, res) => {
         });
     }
 });
+
 
 // riwayat per bulan
 app.get("/transactions/monthly", authenticate, async (req, res) => {
@@ -325,6 +327,7 @@ app.post("/register", async (req, res) => {
             username,
             email,
             saldo: 0, // Set saldo awal menjadi 0
+            photo: null, // Set photo sebagai null
         });
 
         res.status(201).send("User registered successfully");
@@ -335,76 +338,6 @@ app.post("/register", async (req, res) => {
 });
 
 
-app.post("/register-google", async (req, res) => {
-    const { email } = req.body;
-
-    if (!email) {
-        return res.status(400).send({
-            success: false,
-            message: "Email is required",
-        });
-    }
-
-    // Validasi format email
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-        return res.status(400).send({
-            success: false,
-            message: "Gunakan valid email",
-        });
-    }
-
-    try {
-        // Periksa apakah pengguna sudah ada
-        const existingUser = await admin.auth().getUserByEmail(email);
-
-        return res.status(200).send({
-            success: true,
-            message: "User already exists. Proceed to login.",
-            user: {
-                uid: existingUser.uid,
-                email: existingUser.email,
-            },
-        });
-    } catch (error) {
-        if (error.code === "auth/user-not-found") {
-            try {
-                // Buat pengguna baru jika tidak ditemukan
-                const newUser = await admin.auth().createUser({
-                    email: email,
-                });
-
-                // Tambahkan data pengguna ke Firestore
-                await db.collection("users").doc(newUser.uid).set({
-                    email: newUser.email,
-                    username: "", // Kosongkan username
-                    saldo: 0,   // Kosongkan phone
-                });
-
-                return res.status(201).send({
-                    success: true,
-                    message: "User registered successfully",
-                    user: {
-                        uid: newUser.uid,
-                        email: newUser.email,
-                    },
-                });
-            } catch (createError) {
-                console.error("Error creating new user:", createError.message);
-                return res.status(500).send({
-                    success: false,
-                    message: "Gunakan valid email",
-                });
-            }
-        }
-
-        console.error("Error registering user with Google:", error.message);
-        return res.status(500).send({
-            success: false,
-            message: "Gunakan valid email",
-        });
-    }
-});
 
 app.get("/saldo", authenticate, async (req, res) => {
     try {
