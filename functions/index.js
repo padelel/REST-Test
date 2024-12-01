@@ -168,6 +168,63 @@ app.patch("/edit-user", authenticate, async (req, res) => {
     }
 });
 
+app.get("/statistics", authenticate, async (req, res) => {
+    const { startDate, endDate } = req.query;
+
+    if (!startDate || !endDate) {
+        return res.status(400).send("Bad Request: Missing required fields (startDate, endDate).");
+    }
+
+    try {
+        const start = new Date(startDate);
+        const end = new Date(endDate);
+
+        // Query semua transaksi dalam rentang waktu
+        const transactionsQuery = db.collection("transactions")
+            .where("user_id", "==", req.user.uid)
+            .where("date", ">=", start)
+            .where("date", "<=", end);
+        const snapshot = await transactionsQuery.get();
+
+        if (snapshot.empty) {
+            return res.status(404).send({ message: `No transactions found between ${startDate} and ${endDate}.` });
+        }
+
+        // Proses transaksi
+        let totalIncome = 0;
+        let totalOutcome = 0;
+        const categories = {};
+
+        snapshot.docs.forEach(doc => {
+            const transaction = doc.data();
+            const amount = transaction.amount; // Asumsikan field `amount` ada
+            const category = transaction.category || "Uncategorized"; // Default kategori
+
+            if (transaction.type === "Income") {
+                totalIncome += amount;
+            } else if (transaction.type === "Outcome") {
+                totalOutcome += amount;
+
+                // Hitung total berdasarkan kategori
+                categories[category] = (categories[category] || 0) + amount;
+            }
+        });
+
+        const savings = totalIncome - totalOutcome;
+
+        return res.status(200).send({
+            message: `Statistics between ${startDate} and ${endDate}`,
+            totalIncome,
+            totalOutcome,
+            savings,
+            categories,
+        });
+    } catch (error) {
+        console.error("Error fetching statistics:", error);
+        return res.status(500).send({ error: "Internal Server Error", message: error.message });
+    }
+});
+
 
 // riwayat per bulan
 app.get("/transactions/monthly", authenticate, async (req, res) => {
