@@ -179,7 +179,6 @@ app.patch("/edit-user", authenticate, async (req, res) => {
     }
 });
 
-
 app.get("/transaction/weekly-expenses", authenticate, async (req, res) => {
     const { year, month } = req.query;
 
@@ -195,36 +194,37 @@ app.get("/transaction/weekly-expenses", authenticate, async (req, res) => {
             return res.status(404).send("User not found");
         }
 
-        // Calculate the start and end of the selected month in UTC
-        const startDate = startOfMonth(new Date(Date.UTC(year, month - 1, 1)));  // Set UTC date
+        // Calculate the start and end of the selected month in UTC+7
+        const startDate = startOfMonth(new Date(Date.UTC(year, month - 1, 1)));  
         const endDate = endOfMonth(startDate);
+
+        // Convert to Firestore Timestamps
+        const startTimestamp = Timestamp.fromDate(startDate);
+        const endTimestamp = Timestamp.fromDate(endDate);
 
         // Query transactions for the selected month and for the user, with type "Expense"
         const transactionsRef = db.collection("transactions");
         const querySnapshot = await transactionsRef
             .where("user_id", "==", req.user.uid)
             .where("type", "==", "Expense")
-            .where("date", ">=", Timestamp.fromDate(startDate))  // Convert startDate to Firestore Timestamp
-            .where("date", "<=", Timestamp.fromDate(endDate))    // Convert endDate to Firestore Timestamp
+            .where("date", ">=", startTimestamp)
+            .where("date", "<=", endTimestamp)
             .get();
 
         const weeklyExpenses = [];
 
-        // Group the transactions by week
+        // Group the transactions by week number
         querySnapshot.forEach((doc) => {
             const transaction = doc.data();
             const transactionDate = transaction.date.toDate();  // Convert Firestore Timestamp to JavaScript Date
-            const weekStart = startOfWeek(transactionDate);
-            const weekEnd = endOfWeek(transactionDate);
+            const weekNumber = getWeek(transactionDate);  // Get the week number of the year
 
             // Check if this week already exists in the array
-            let week = weeklyExpenses.find((week) =>
-                week.start.getTime() === weekStart.getTime() // Check if the week start date is the same
-            );
+            let week = weeklyExpenses.find((week) => week.week === weekNumber);
 
             if (!week) {
                 // If the week doesn't exist, create a new entry
-                week = { start: weekStart, end: weekEnd, totalExpense: 0 };
+                week = { week: weekNumber, totalExpense: 0 };
                 weeklyExpenses.push(week);
             }
 
@@ -232,10 +232,9 @@ app.get("/transaction/weekly-expenses", authenticate, async (req, res) => {
             week.totalExpense += transaction.amount;
         });
 
-        // Format the response to display weekly expenses in the month
+        // Format the response to display weekly expenses by week number
         const formattedWeeks = weeklyExpenses.map(week => ({
-            weekStart: format(week.start, 'yyyy-MM-dd'),
-            weekEnd: format(week.end, 'yyyy-MM-dd'),
+            week: `Week ${week.week}`,
             totalExpense: week.totalExpense
         }));
 
