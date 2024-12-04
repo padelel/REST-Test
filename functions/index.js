@@ -7,6 +7,9 @@ admin.initializeApp({
 
 const express = require("express");
 const cors = require("cors");
+const { startOfMonth, endOfMonth, startOfWeek, endOfWeek, format } = require('date-fns');
+const { Timestamp } = require('firebase-admin/firestore');
+
 
 // Main App
 const app = express();
@@ -37,17 +40,24 @@ const authenticate = async (req, res, next) => {
 app.post("/transaction", authenticate, async (req, res) => {
     const { type, category, amount } = req.body;
 
-
     if (!type || !category || !amount) {
         return res.status(400).send("Bad Request: Missing required fields");
     }
-
     try {
-        const categoryRef = db.collection("categories").doc(category);
-        const categoryDoc = await categoryRef.get();
+        // If the type is "Income", category can be any string, no need to check it against the categories collection
+        if (type === "Income") {
+            // Ensure that category is a valid string and not empty
+            if (typeof category !== 'string' || category.trim() === "") {
+                return res.status(400).send("Bad Request: Invalid category for Income");
+            }
+        } else {
+            // For other types, validate the category exists in the "categories" collection
+            const categoryRef = db.collection("categories").doc(category);
+            const categoryDoc = await categoryRef.get();
 
-        if (!categoryDoc.exists) {
-            return res.status(400).send("Bad Request: Invalid category");
+            if (!categoryDoc.exists) {
+                return res.status(400).send("Bad Request: Invalid category");
+            }
         }
 
         const userRef = db.collection("users").doc(req.user.uid);
@@ -57,21 +67,21 @@ app.post("/transaction", authenticate, async (req, res) => {
             return res.status(404).send("User not found");
         }
 
-        // Hitung saldo baru
+        // Calculate the new balance
         const currentSaldo = userDoc.data().saldo || 0;
         const updatedSaldo = type === "Income"
             ? currentSaldo + parseFloat(amount)
             : currentSaldo - parseFloat(amount);
 
-        // Update saldo user
+        // Update user's saldo
         await userRef.update({ saldo: updatedSaldo });
 
-        // Tambahkan transaksi ke Firestore
+        // Add transaction to Firestore
         const newTransactionRef = db.collection("transactions").doc();
         const newTransactionId = newTransactionRef.id;
 
         const newTransaction = {
-            id: newTransactionId, // Simpan ID transaksi ke dokumen
+            id: newTransactionId, // Store transaction ID
             user_id: req.user.uid,
             type,
             category,
@@ -90,6 +100,7 @@ app.post("/transaction", authenticate, async (req, res) => {
         return res.status(500).send("Error adding transaction: " + error.message);
     }
 });
+
 
 
 // Kurangi atau Tambahkan Saldo Saat Transaksi Dihapus
@@ -167,6 +178,78 @@ app.patch("/edit-user", authenticate, async (req, res) => {
         });
     }
 });
+
+
+app.get("/transaction/weekly-expenses", authenticate, async (req, res) => {
+    const { year, month } = req.query;
+
+    if (!year || !month) {
+        return res.status(400).send("Bad Request: Missing year or month");
+    }
+
+    try {
+        const userRef = db.collection("users").doc(req.user.uid);
+        const userDoc = await userRef.get();
+
+        if (!userDoc.exists) {
+            return res.status(404).send("User not found");
+        }
+
+        // Calculate the start and end of the selected month in UTC
+        const startDate = startOfMonth(new Date(Date.UTC(year, month - 1, 1)));  // Set UTC date
+        const endDate = endOfMonth(startDate);
+
+        // Query transactions for the selected month and for the user, with type "Expense"
+        const transactionsRef = db.collection("transactions");
+        const querySnapshot = await transactionsRef
+            .where("user_id", "==", req.user.uid)
+            .where("type", "==", "Expense")
+            .where("date", ">=", Timestamp.fromDate(startDate))  // Convert startDate to Firestore Timestamp
+            .where("date", "<=", Timestamp.fromDate(endDate))    // Convert endDate to Firestore Timestamp
+            .get();
+
+        const weeklyExpenses = [];
+
+        // Group the transactions by week
+        querySnapshot.forEach((doc) => {
+            const transaction = doc.data();
+            const transactionDate = transaction.date.toDate();  // Convert Firestore Timestamp to JavaScript Date
+            const weekStart = startOfWeek(transactionDate);
+            const weekEnd = endOfWeek(transactionDate);
+
+            // Check if this week already exists in the array
+            let week = weeklyExpenses.find((week) =>
+                week.start.getTime() === weekStart.getTime() // Check if the week start date is the same
+            );
+
+            if (!week) {
+                // If the week doesn't exist, create a new entry
+                week = { start: weekStart, end: weekEnd, totalExpense: 0 };
+                weeklyExpenses.push(week);
+            }
+
+            // Add the expense to the appropriate week
+            week.totalExpense += transaction.amount;
+        });
+
+        // Format the response to display weekly expenses in the month
+        const formattedWeeks = weeklyExpenses.map(week => ({
+            weekStart: format(week.start, 'yyyy-MM-dd'),
+            weekEnd: format(week.end, 'yyyy-MM-dd'),
+            totalExpense: week.totalExpense
+        }));
+
+        return res.status(200).send({
+            message: "Weekly expenses retrieved successfully",
+            weeklyExpenses: formattedWeeks,
+        });
+    } catch (error) {
+        console.error("Error retrieving weekly expenses:", error);
+        return res.status(500).send("Error retrieving weekly expenses: " + error.message);
+    }
+});
+
+
 
 app.get("/statistics", authenticate, async (req, res) => {
     const { startDate, endDate } = req.query;
